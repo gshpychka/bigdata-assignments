@@ -32,7 +32,7 @@ gcp_provider = gcp.Provider(
     project="streaming-etl-gshpychka",
 )
 
-gcp_services_to_enable = ["pubsub", "container", "dataflow", "dataproc"]
+gcp_services_to_enable = ["pubsub", "container", "dataflow", "dataproc", "bigquerydatatransfer"]
 gcp_services: dict[str, gcp.projects.Service] = {}
 
 for service in gcp_services_to_enable:
@@ -251,14 +251,6 @@ parsed_input_table = gcp.bigquery.Table(
     opts=pulumi.ResourceOptions(provider=gcp_provider, delete_before_replace=True),
     deletion_protection=False,
 )
-# parsing_errors_table = gcp.bigquery.Table(
-#     "parsing-deadletter-table",
-#     dataset_id=bq_dataset.dataset_id,
-#     table_id=parsed_input_table.table_id.apply(lambda x: f"{x}_error_records"),
-#     time_partitioning=dict(type="DAY"),
-#     opts=pulumi.ResourceOptions(provider=gcp_provider, delete_before_replace=True),
-#     deletion_protection=False,
-# )
 
 udf_bucket = gcp.storage.Bucket(
     "udf-bucket",
@@ -368,25 +360,68 @@ etl_job = gcp.dataflow.Job(
     service_account_email=dataflow_service_account.email,
 )
 
+aggregation_query = """CREATE OR REPLACE VIEW `bq_dataset_v1.aggregated_view`  AS SELECT
+TIMESTAMP_TRUNC(timestamp, MINUTE) as timestamp_start,
+AVG((ask + bid) / 2) as avg_midprice,
+instrument_name
+FROM
+`streaming-etl-gshpychka.bq_dataset_v1.parsed`
+GROUP BY instrument_name, TIMESTAMP_TRUNC(timestamp, MINUTE)
+"""
+aggregated_view = gcp.bigquery.Job(
+    "aggregate-ticks",
+    job_id="aggregate-ticks",
+    query=gcp.bigquery.JobQueryArgs(query=aggregation_query, allow_large_results=True),
+    opts=pulumi.ResourceOptions(
+        provider=gcp_provider, depends_on=gcp_services["bigquerydatatransfer"]
+    ),
+)
+
+dataproc_staging_bucket = gcp.storage.Bucket(
+    "dataproc-staging-bucket",
+    force_destroy=True,
+    opts=pulumi.ResourceOptions(provider=gcp_provider),
+)
+
 cluster = gcp.dataproc.Cluster(
     "my-cluster",
     cluster_config=gcp.dataproc.ClusterClusterConfigArgs(
+        staging_bucket=dataproc_staging_bucket.name,
         endpoint_config=gcp.dataproc.ClusterClusterConfigEndpointConfigArgs(
             enable_http_port_access=True
         ),
         software_config=gcp.dataproc.ClusterClusterConfigSoftwareConfigArgs(
-            image_version="2.0",
-            optional_components=["JUPYTER"]
+            image_version="2.0", optional_components=["JUPYTER"]
+        ),
+        initialization_actions=[
+            gcp.dataproc.ClusterClusterConfigInitializationActionArgs(
+                script=gcp_provider.region.apply(
+                    lambda x: f"gs://goog-dataproc-initialization-actions-{x}/connectors/connectors.sh"
+                )
+            )
+        ],
+        gce_cluster_config=gcp.dataproc.ClusterClusterConfigGceClusterConfigArgs(
+            metadata={"spark-bigquery-connector-version": "0.21.1"}
         ),
         master_config=gcp.dataproc.ClusterClusterConfigMasterConfigArgs(
-            num_instances=1
+            num_instances=1,
+            disk_config=gcp.dataproc.ClusterClusterConfigMasterConfigDiskConfigArgs(
+                boot_disk_type="pd-ssd",
+                boot_disk_size_gb=100,
+            ),
         ),
         worker_config=gcp.dataproc.ClusterClusterConfigWorkerConfigArgs(
-            num_instances=2
+            num_instances=2,
+            disk_config=gcp.dataproc.ClusterClusterConfigWorkerConfigDiskConfigArgs(
+                boot_disk_size_gb=30,
+                num_local_ssds=1,
+            ),
         ),
     ),
     opts=pulumi.ResourceOptions(
-        provider=gcp_provider, depends_on=gcp_services["dataproc"]
+        provider=gcp_provider,
+        depends_on=gcp_services["dataproc"],
+        delete_before_replace=True,
     ),
     region=typing.cast(str, gcp_provider.region),
 )
@@ -395,5 +430,4 @@ cluster = gcp.dataproc.Cluster(
 
 # # Export the DNS name of the bucket
 # pulumi.export("cluster_name", cluster.name)
-# pulumi.export("bucket_name", bucket.name)
 pulumi.export("kubeconfig", k8s_config)
