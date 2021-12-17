@@ -23,6 +23,7 @@ class WebsocketStreamerBase:
         self.logger = logger
 
     async def streamer(self):
+        # Стрімінг даних по WebSockets
         time_between_reconnects_s = 5
         while True:
             self.logger.info(f"Connecting to {self.url}")
@@ -30,6 +31,8 @@ class WebsocketStreamerBase:
                 self.url, **self.connection_kwargs
             ) as connection:
                 self.logger.info(f"Connected to {self.url}")
+                # Функції ініціалізації та підписки на необхідні канали імплементуються
+                # класами, що наслідують базовий
                 await self.initialize(connection)
                 await self.subscribe(connection)
                 while connection.open:
@@ -37,6 +40,7 @@ class WebsocketStreamerBase:
                     self.logger.debug(f"Response: {data}")
                     await self.handle(data)
 
+            # При обриві з'єднання, відновити його через певний інтвреал
             self.logger.warning(
                 f"Connection closed, reconnecting in {time_between_reconnects_s}s..."
             )
@@ -73,12 +77,15 @@ class FinancialDataStreamer(WebsocketStreamerBase):
             logger=logger
             # connection_kwargs=dict(compression=None),
         )
+        # Клієнт GCP SDK для роботи з Pub/Sub
         self.publisher = pubsub_v1.PublisherClient()
         self.topic_path = pubsub_topic_path
+        # Список символів, на ціни яких підписуватись
         self.instrument_names = instrument_names
 
     @staticmethod
     def get_subscription_message(channels) -> str:
+        # Формат повідомлення для підписки на канали
         message = {
             "jsonrpc": "2.0",
             "method": "public/subscribe",
@@ -90,6 +97,7 @@ class FinancialDataStreamer(WebsocketStreamerBase):
     async def subscribe(
         self, connection: websockets.client.WebSocketClientProtocol
     ) -> None:
+        # підписка на необхідні канали
         channel_name_template = "ticker.{}.raw"
         channels = [
             channel_name_template.format(instrument_name)
@@ -100,6 +108,7 @@ class FinancialDataStreamer(WebsocketStreamerBase):
         pass
 
     async def handle(self, data: Data) -> None:
+        # Кодування отриманих даних і запис у потік Pub/Sub
         encoded = str(data).encode("utf-8")
 
         future = self.publisher.publish(self.topic_path, encoded)
@@ -110,6 +119,7 @@ class FinancialDataStreamer(WebsocketStreamerBase):
 
 
 def setup_logging(level: typing.Union[int, str]) -> logging.Logger:
+    # Налаштування логування у консоль з заданим рівнем
     logger = logging.getLogger()
     handler = logging.StreamHandler()
     logging.basicConfig(level=level, handlers=[handler], force=True)
@@ -117,11 +127,10 @@ def setup_logging(level: typing.Union[int, str]) -> logging.Logger:
 
 
 if __name__ == "__main__":
+    # Зчитування параметрів зі змінних середовища
     pubsub_topic_path = os.environ["PUBSUB_TOPIC_PATH"]
     log_level = int(os.getenv("LOG_LEVEL", logging.INFO))
     logger = setup_logging(level=log_level)
-    print("hello world")
-    print(pubsub_topic_path)
 
     instrument_names = ["BTC-PERPETUAL", "ETH-PERPETUAL"]
 
